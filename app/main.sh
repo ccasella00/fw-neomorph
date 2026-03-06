@@ -86,12 +86,14 @@ native_bet_image=${WORK_DIR}/native_bet_image.nii.gz
 native_brain_mask=${WORK_DIR}/native_brain_mask.nii.gz
 input_file_DN=${WORK_DIR}/native_image_DN.nii.gz
 input_file_BC=${WORK_DIR}/native_image_BC.nii.gz
+native_subject_eroded_mask=${WORK_DIR}/native_eroded_mask.nii.gz
+fslmaths ${native_brain_mask} -ero -ero ${native_subject_eroded_mask}
 
 
 #denoise, bias correct and bet image to help with registration to template
 DenoiseImage -i ${input_file} -o ${input_file_DN}
 N4BiasFieldCorrection -i ${input_file_DN} -o ${input_file_BC}
-mri_synthstrip -i ${input_file_BC} -o ${native_bet_image} -m ${native_brain_mask} -b 2
+mri_synthstrip -i ${input_file_BC} -o ${native_bet_image} -m ${native_brain_mask} -b 1
 sync
 echo "BET image and mask created"
 ls ${native_bet_image} ${native_brain_mask}
@@ -106,29 +108,28 @@ echo "Registering native BET image to template brain"
 SUBJECT==`basename $input_file`
 PREFIX="${SUBJECT}_to_Bonn_"
 
-echo -e "\n Run SyN registration"
-#antsRegistrationSyN.sh -d 3 -t 's' -f ${template} -m ${native_bet_image} -j 1 -p 'f' -o ${WORK_DIR}/bet_ -n 4
+echo -e "\n Run registration"
+
 ants antsRegistration -d 3 --float 1 \
-    --output [${PREFIX},${WORK_DIR}/${SUBJECT}_warped_to_template.nii.gz] \
-    --interpolation Linear \
-    --use-histogram-matching 0 \
-    --initial-moving-transform [${template},${native_bet_image},1] \
-    --transform Rigid[0.1] \
-    --metric MI[${template},${native_bet_image},1,32,Regular,0.25] \
-    --convergence [1000x500x250x100,1e-6,10] \
-    --shrink-factors 8x4x2x1 \
-    --smoothing-sigmas 3x2x1x0vox \
-    --transform Affine[0.1] \
-    --metric MI[${template},${native_bet_image},1,32,Regular,0.25] \
-    --convergence [1000x500x250x100,1e-6,10] \
-    --shrink-factors 8x4x2x1 \
-    --smoothing-sigmas 3x2x1x0vox \
-    --transform SyN[0.2,3,0] \
-    --metric CC[${template},${native_bet_image},1,5] \
-    --convergence [100x70x50x50,1e-6,10] \
-    --shrink-factors 8x4x2x1 \
-    --smoothing-sigmas 3x2x1x0vox \
-    --masks ${template_mask}
+  --output [${PREFIX},${WORK_DIR}/${SUBJECT}_warped_to_template.nii.gz] \
+  --use-histogram-matching 1 \
+  --initial-moving-transform [${template},${native_bet_image},1] \
+  --transform Rigid[0.1] \
+    --metric MI[${template},${native_bet_image},1,32,Random,0.3] \
+    --convergence [1000x500x250,1e-6,10] \
+    --shrink-factors 8x4x2 \
+    --smoothing-sigmas 4x2x1mm \
+  --transform Affine[0.1] \
+    --metric MI[${template},${native_bet_image},1,32,Random,0.3] \
+    --convergence [1000x500x250,1e-6,10] \
+    --shrink-factors 8x4x2 \
+    --smoothing-sigmas 4x2x1mm \
+  --transform SyN[0.1, 6, 0.5] \
+    --metric CC[${template},${native_bet_image},1,4] \
+    --convergence [100x70x50,1e-6,10] \
+    --shrink-factors 8x4x2 \
+     --smoothing-sigmas 3x2x1mm \
+   --masks [${template_mask},${native_subject_eroded_mask}]
 
 
 sync
@@ -154,9 +155,9 @@ ants antsApplyTransforms -d 3 \
 # Transform Intensity Priors (Linear Interpolation)
 echo "Transforming priors to native space for segmentation"
 items=(
-    "${TEMPLATE_DIR}/prior1_scale_final.nii.gz"
-    "${TEMPLATE_DIR}/prior2_scale_final.nii.gz"
-    "${TEMPLATE_DIR}/prior3_scale_final.nii.gz"
+    "${TEMPLATE_DIR}/prior1_scale_final2.nii.gz"
+    "${TEMPLATE_DIR}/prior2_scale_final2.nii.gz"
+    "${TEMPLATE_DIR}/prior3_scale_final2.nii.gz"
 )
 
 for item in "${items[@]}"; do
@@ -193,18 +194,34 @@ done
 
 # Run Atropos
 echo -e "\n --- Step 3: Segmenting images --- "
-fslmaths ${native_brain_mask} -dilM -dilM ${WORK_DIR}/native_brain_mask_dil.nii.gz
+
+# First create a safer mask by merging Synthstrip with the Template-based mask
+# This prevents the cropping if Synthstrip fails locally
+
+ants antsApplyTransforms -d 3 -i ${template_mask} -r ${input_file_BC} \
+    -o ${WORK_DIR}/template_mask_in_native.nii.gz \
+    -n NearestNeighbor -t [${AFFINE},1] -t ${INVERSE_WARP}
+
+fslmaths ${native_brain_mask} -add ${WORK_DIR}/template_mask_in_native.nii.gz -bin ${WORK_DIR}/combined_mask.nii.gz
+
 sync
-antsAtroposN4.sh -d 3 -a ${input_file_BC} -x ${WORK_DIR}/native_brain_mask_dil.nii.gz -p ${WORK_DIR}/prior%d_scale_final.nii.gz -c 3 -y 1 -w 0.5 -o ${WORK_DIR}/${SUBJECT}_ants_atropos_
+
+ants antsAtroposN4.sh -d 3 \
+    -a ${input_file_BC} \
+    -x ${WORK_DIR}/combined_mask.nii.gz \
+    -p ${WORK_DIR}/prior%d_scale_final2.nii.gz \
+    -c 3 -y 1 \
+    -w 0.25 \
+    -o ${WORK_DIR}/${SUBJECT}_ants_atropos_
 sync
 echo -e "\n Past Atropos segmentation step "
 
 sleep 3
 
 # Define posterior images from Atropos segmentation (segmentation in native space with 3 priors)
-Posterior1=${WORK_DIR}/ants_atropos_SegmentationPosteriors1.nii.gz
-Posterior2=${WORK_DIR}/ants_atropos_SegmentationPosteriors2.nii.gz
-Posterior3=${WORK_DIR}/ants_atropos_SegmentationPosteriors3.nii.gz
+Posterior1=${WORK_DIR}/${SUBJECT}_ants_atropos_SegmentationPosteriors1.nii.gz
+Posterior2=${WORK_DIR}/${SUBJECT}_ants_atropos_SegmentationPosteriors2.nii.gz
+Posterior3=${WORK_DIR}/${SUBJECT}_ants_atropos_SegmentationPosteriors3.nii.gz
 
 
 echo -e "\n --- Step 4: Hello MDR, time to refine segmentations --- "
