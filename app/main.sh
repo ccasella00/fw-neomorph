@@ -86,14 +86,16 @@ native_bet_image=${WORK_DIR}/native_bet_image.nii.gz
 native_brain_mask=${WORK_DIR}/native_brain_mask.nii.gz
 input_file_DN=${WORK_DIR}/native_image_DN.nii.gz
 input_file_BC=${WORK_DIR}/native_image_BC.nii.gz
-native_subject_eroded_mask=${WORK_DIR}/native_eroded_mask.nii.gz
-fslmaths ${native_brain_mask} -ero -ero ${native_subject_eroded_mask}
 
 
 #denoise, bias correct and bet image to help with registration to template
 DenoiseImage -i ${input_file} -o ${input_file_DN}
 N4BiasFieldCorrection -i ${input_file_DN} -o ${input_file_BC}
 mri_synthstrip -i ${input_file_BC} -o ${native_bet_image} -m ${native_brain_mask} -b 1
+
+native_subject_eroded_mask=${WORK_DIR}/native_eroded_mask.nii.gz
+fslmaths ${native_brain_mask} -ero -ero ${native_subject_eroded_mask}
+
 sync
 echo "BET image and mask created"
 ls ${native_bet_image} ${native_brain_mask}
@@ -105,12 +107,13 @@ sleep 3
 echo "Registering native BET image to template brain"
 
 # --- Registration Settings ---
-SUBJECT==`basename $input_file`
-PREFIX="${SUBJECT}_to_Bonn_"
+SUBJECT=$(basename "$input_file" .nii.gz)
+SUBJECT=${SUBJECT%.nii}
+PREFIX="${WORK_DIR}/${SUBJECT}_to_Bonn_"
 
 echo -e "\n Run registration"
 
-ants antsRegistration -d 3 --float 1 \
+antsRegistration -d 3 --float 1 \
   --output [${PREFIX},${WORK_DIR}/${SUBJECT}_warped_to_template.nii.gz] \
   --use-histogram-matching 1 \
   --initial-moving-transform [${template},${native_bet_image},1] \
@@ -139,11 +142,11 @@ echo "***"
 
 echo -e "\n --- Step 2: Apply registration to segmentation priors --- "
 # Get the affine and warp files from the registration
-AFFINE=$(ls ${WORK_DIR}/${PREFIX}0GenericAffine.mat)
-INVERSE_WARP=$(ls ${WORK_DIR}/${PREFIX}1InverseWarp.nii.gz)
+AFFINE="${PREFIX}0GenericAffine.mat"
+INVERSE_WARP="${PREFIX}1InverseWarp.nii.gz"
 
 # Initial transformation of the whole template
-ants antsApplyTransforms -d 3 \
+antsApplyTransforms -d 3 \
   -i ${template} \
   -r ${native_bet_image} \
   -o ${WORK_DIR}/template_in_native.nii.gz \
@@ -174,7 +177,7 @@ done
 echo "Transforming masks to native space"
 items=(
     "${TEMPLATE_DIR}/ventricles_mask.nii.gz"
-    "${TEMPLATE_DIR}/BCP_subGM_mask.nii.gz""
+    "${TEMPLATE_DIR}/BCP_subGM_mask.nii.gz"
     "${TEMPLATE_DIR}/cerebellum_mask.nii.gz"
     "${TEMPLATE_DIR}/brainstem_mask.nii.gz"
 )
